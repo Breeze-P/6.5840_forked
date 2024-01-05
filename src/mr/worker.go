@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -43,22 +44,37 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
-	id := GetID()
-	t, taskID, fileNames, nReduce := GetTask(id)
+	// TODO 这里应该定义/创建一个worker实例（面向对象编程
+	id := GetID() // 注册worker
+	if id == -1 {
+		fmt.Println("server died!")
+		return
+	}
 
-	if t == "Map" {
-		res := MapPlayer(mapf, fileNames[0])
+	// go KeepAlive(id) // 不断推送自己的生命状态
 
-		outputFileNames := StoreKV(taskID, res, nReduce)
-		if len(outputFileNames) != 0 {
-			DoneMap(taskID, outputFileNames)
+	for { // 不断轮训任务
+		t, taskID, fileNames, nReduce := GetTask(id)
+		if t == "Map" {
+			res := MapPlayer(mapf, fileNames[0])
+			outputFileNames := StoreKV(taskID, res, nReduce)
+			if len(outputFileNames) != 0 {
+				DoneMap(taskID, outputFileNames)
+			}
+		} else if t == "Reduce" {
+			ReducerPlayer(reducef, taskID, fileNames)
+			DoneReduce(taskID)
+		} else if t == "Dial" {
+			time.Sleep(time.Second) // 没有任务，一秒之后再查询
+		} else {
+			fmt.Println("server died!")
+			return // 服务结束返回
 		}
-	} else {
-		ReducerPlayer(reducef, taskID, fileNames)
-		DoneReduce(taskID)
+		time.Sleep(time.Millisecond * 500)
 	}
 }
 
+// TODO 这里感觉所有的请求分发操作可以提取出组件
 func GetID() int {
 	args := EmptyArgs{}
 
@@ -66,10 +82,10 @@ func GetID() int {
 
 	ok := call("Coordinator.GetID", &args, &reply)
 	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Id %v\n", reply.Id)
+		fmt.Printf("Get Worker ID: %v\n", reply.Id)
 	} else {
 		fmt.Printf("call failed!\n")
+		return -1
 	}
 	return reply.Id
 }
@@ -84,8 +100,7 @@ func GetTask(id int) (string, int, []string, int) {
 	ok := call("Coordinator.GetTask", &args, &reply)
 
 	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.T %v fileNames %v\n", reply.T, reply.FileNames)
+		fmt.Printf("Get an %v Task/Signal\n", reply.T)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
@@ -112,9 +127,10 @@ func StoreKV(id int, res []KeyValue, nReduce int) []string {
 
 	encs := []*json.Encoder{}
 	for i := 0; i < nReduce; i++ {
-		filename := "intermediate/mr-" + strconv.Itoa(id) + "-" + strconv.Itoa(i)
+		filename := "mr-" + strconv.Itoa(id) + "-" + strconv.Itoa(i)
 		outputFileNames = append(outputFileNames, filename)
 		file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+		// TODO 未catch err
 		defer file.Close()
 		if err != nil {
 			log.Fatalf("cannot open %v", filename)
@@ -128,7 +144,7 @@ func StoreKV(id int, res []KeyValue, nReduce int) []string {
 		enc := encs[index]
 		err := enc.Encode(&kv)
 		if err != nil {
-			log.Fatalf("cannot failed into %v", outputFileNames[index])
+			log.Fatalf("cannot inserted into %v", outputFileNames[index])
 			return []string{}
 		}
 	}
@@ -171,7 +187,7 @@ func ReducerPlayer(reducef func(string, []string) string, id int, filenames []st
 	}
 	sort.Sort(ByKey(intermediate))
 
-	oname := "result/mr-out-" + strconv.Itoa(id)
+	oname := "mr-out-" + strconv.Itoa(id)
 	ofile, _ := os.Create(oname)
 	defer ofile.Close()
 
@@ -207,6 +223,19 @@ func DoneReduce(id int) {
 		fmt.Printf("Reduce Task %v Come Over\n", id)
 	} else {
 		fmt.Printf("DoneReduce call failed!\n")
+	}
+}
+
+func KeepAlive(id int) {
+	args := KeepAliveArgs{
+		id,
+	}
+
+	reply := EmptyReply{}
+
+	for {
+		time.Sleep(time.Second)
+		call("Coordinator.KeepAlive", &args, &reply)
 	}
 }
 

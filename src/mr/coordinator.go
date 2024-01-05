@@ -8,18 +8,26 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
+// TODO 其实id没用，都是靠在数组中的下标标识object的
 type MapTask struct {
 	id       int
 	status   int // 0: free, 1: working, 2: done
 	fileName string
+
+	startTime time.Time
+	workerID  int
 }
 
 type ReduceTask struct {
 	id        int
 	status    int
 	fileNames []string
+
+	startTime time.Time
+	workerID  int
 }
 
 type WorkerInstance struct {
@@ -51,37 +59,86 @@ func (c *Coordinator) GetID(args *EmptyArgs, reply *GetIDReply) error {
 	return nil
 }
 
+// Function to check if a task has timed out
+func hasTimeOut(startTime time.Time) bool {
+	timeoutDuration := 10 * time.Second
+	return time.Since(startTime) > timeoutDuration
+}
+
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.mapDone { // 分配map任务
 		reply.T = "Map"
 		for i, m := range c.mapTasks {
+			if m.status == 1 {
+				if hasTimeOut(m.startTime) { // 超时重新分配任务
+					c.workers[c.mapTasks[i].workerID].status = 2 // 标记死亡
+					c.workers[args.Id].status = 1
+
+					c.mapTasks[i].workerID = args.Id
+					c.mapTasks[i].startTime = time.Now()
+
+					reply.TaskId = m.id
+					reply.FileNames = []string{m.fileName}
+					reply.NReduce = len(c.reduceTasks)
+					fmt.Println("A map task has been distributed again, ", m.id)
+					return nil
+				}
+			}
 			if m.status == 0 {
+				c.workers[args.Id].status = 1
+
 				c.mapTasks[i].status = 1 // 要更改原数据
+				c.mapTasks[i].workerID = args.Id
+				c.mapTasks[i].startTime = time.Now()
+
 				reply.TaskId = m.id
 				reply.FileNames = []string{m.fileName}
 				reply.NReduce = len(c.reduceTasks)
-				fmt.Println("A map task has been distributed ", m.id)
-				break
+				fmt.Println("A map task has been distributed, ", m.id)
+				return nil
 			}
 		}
+		reply.T = "Dial" // 无任务可分配
 		return nil
 	}
 	if !c.reduceDone { // 分配reduce任务
 		reply.T = "Reduce"
 		for i, r := range c.reduceTasks {
+			if r.status == 1 {
+				if hasTimeOut(r.startTime) { // 超时重新分配任务
+					c.workers[c.reduceTasks[i].workerID].status = 2 // 标记死亡
+					c.workers[args.Id].status = 1
+
+					c.reduceTasks[i].workerID = args.Id
+					c.reduceTasks[i].startTime = time.Now()
+
+					reply.TaskId = r.id
+					reply.FileNames = r.fileNames
+					reply.NReduce = len(c.reduceTasks)
+					fmt.Println("A reduce task has been distributed again, ", r.id)
+					return nil
+				}
+			}
 			if r.status == 0 {
-				c.mapTasks[i].status = 1
+				c.workers[args.Id].status = 1
+
+				c.reduceTasks[i].status = 1 // 要更改原数据
+				c.reduceTasks[i].workerID = args.Id
+				c.reduceTasks[i].startTime = time.Now()
+
 				reply.TaskId = r.id
 				reply.FileNames = r.fileNames
 				reply.NReduce = len(c.reduceTasks)
 				fmt.Println("A reduce task has been distributed ", r.id)
-				break
+				return nil
 			}
 		}
+		reply.T = "Dial" // 无任务可分配
 		return nil
 	}
+	reply.T = "Done" // 结束
 	return nil
 }
 
@@ -148,7 +205,14 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
+	ret := c.mapDone && c.reduceDone
+
+	// for _, r := range c.reduceTasks {
+	// 	if r.status != 2 {
+	// 		return false
+	// 	}
+	// }
+	// ret = true
 
 	// Your code here.
 
