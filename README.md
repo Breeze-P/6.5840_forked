@@ -18,10 +18,12 @@ shuffle部分由reduce继承，具体方法为map阶段输出mr-[mapID]-[reduceI
 
 ✅
 
-* 完成基本业务需求
+* 完成基本业务需求：实现**分布式**mapreduce
 * 通过测试脚本
+* 实现基本容错：worker crash，task重分配
 
 ❌
 
 * 未catch err
 * 未研究测试脚本
+* no backup&&rename when completed, cause no TempFile
